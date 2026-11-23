@@ -5,7 +5,9 @@
 package software.amazon.smithy.model.validation.validators;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import software.amazon.smithy.jmespath.ExpressionVisitor;
 import software.amazon.smithy.jmespath.JmespathExpression;
 import software.amazon.smithy.jmespath.ast.AndExpression;
@@ -299,7 +301,21 @@ final class JmespathShapeWalker {
 
         @Override
         public Result visitMultiSelectHash(MultiSelectHashExpression expression) {
-            return unsupported();
+            // A multi-select hash constructs a new object from the current scope. Walk each
+            // value expression to resolve its type, then build a synthetic StructureShape
+            // whose members carry those types. This lets every consumer treat the result as
+            // a normal shape — no special-casing for hashes at any callsite.
+            StructureShape.Builder builder = StructureShape.builder()
+                    .id(ShapeId.from("smithy.synthetic#MultiSelectHash"
+                            + Integer.toHexString(expression.hashCode())));
+            for (Map.Entry<String, JmespathExpression> entry : expression.getExpressions().entrySet()) {
+                Result valueResult = walkInto(entry.getValue(), in);
+                if (valueResult.error != null) {
+                    return valueResult;
+                }
+                builder.addMember(entry.getKey(), valueResult.type.shape.getId());
+            }
+            return Result.ok(new Type(builder.build(), in.arrays));
         }
 
         @Override

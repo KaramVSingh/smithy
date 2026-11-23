@@ -1,0 +1,1 @@
+[ERROR] smithy.test.divergentshape#CreateSseConnect: JMESPath expression `sseRegions[].{regionName: length(@)}` for property `sseRegions` in `@createsResources` contains unsupported expressions: '`length` function' | ResourceLifecycleTrait

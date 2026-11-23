@@ -388,29 +388,60 @@ public final class ResourceLifecycleTraitValidator extends AbstractValidator {
             String path,
             Shape leaf
     ) {
+        ShapeId declared;
         if (kind == ResourceMemberInference.BindingKind.IDENTIFIER) {
-            ShapeId declared = unwrapBaseId(ctx.model, ctx.resource.getIdentifiers().get(name));
-            if (!leaf.getId().equals(declared)) {
-                ctx.error(format("JMESPath expression `%s` for identifier `%s` in `@%s` resolves to `%s`, but the "
-                        + "resource identifier targets `%s`.",
-                        path,
-                        name,
-                        ctx.traitName(),
-                        leaf.getId(),
-                        declared));
-            }
+            declared = unwrapBaseId(ctx.model, ctx.resource.getIdentifiers().get(name));
         } else {
-            ShapeId declared = unwrapBaseId(ctx.model, ctx.resource.getProperties().get(name));
-            if (!leaf.getId().equals(declared)) {
-                ctx.error(format("JMESPath expression `%s` for property `%s` in `@%s` resolves to `%s`, but the "
-                        + "resource property targets `%s`.",
-                        path,
-                        name,
-                        ctx.traitName(),
-                        leaf.getId(),
-                        declared));
-            }
+            declared = unwrapBaseId(ctx.model, ctx.resource.getProperties().get(name));
         }
+
+        Shape target = ctx.model.getShape(declared).orElse(null);
+        if (target == null) {
+            return;
+        }
+
+        String mismatch = typeMismatch(ctx.model, leaf, target, kindWord);
+        if (mismatch != null) {
+            ctx.error(format("JMESPath expression `%s` for %s `%s` in `@%s` %s",
+                    path, kindWord, name, ctx.traitName(), mismatch));
+        }
+    }
+
+    /**
+     * Recursively compares two shapes for structural type compatibility. Returns a human-readable
+     * mismatch description, or null if the types are compatible.
+     *
+     * <p>For structures, each member of {@code actual} must exist in {@code expected} with a
+     * compatible type — {@code actual} may be a subset of {@code expected}. For non-structures,
+     * the shape IDs must match (after list unwrapping).
+     */
+    private static String typeMismatch(Model model, Shape actual, Shape expected, String kindWord) {
+        if (actual.getId().equals(expected.getId())) {
+            return null;
+        }
+
+        if (actual instanceof StructureShape && expected instanceof StructureShape) {
+            StructureShape actualStruct = (StructureShape) actual;
+            StructureShape expectedStruct = (StructureShape) expected;
+            for (MemberShape actualMember : actualStruct.getAllMembers().values()) {
+                String key = actualMember.getMemberName();
+                MemberShape expectedMember = expectedStruct.getMember(key).orElse(null);
+                if (expectedMember == null) {
+                    return format("key `%s` does not match any member of `%s`",
+                            key, expected.getId());
+                }
+                Shape actualTarget = model.expectShape(unwrapBaseId(model, actualMember.getTarget()));
+                Shape expectedTarget = model.expectShape(unwrapBaseId(model, expectedMember.getTarget()));
+                String inner = typeMismatch(model, actualTarget, expectedTarget, kindWord);
+                if (inner != null) {
+                    return format("key `%s`: %s", key, inner);
+                }
+            }
+            return null;
+        }
+
+        return format("resolves to `%s`, but the resource %s targets `%s`.",
+                actual.getId(), kindWord, expected.getId());
     }
 
     private void checkMemberType(
@@ -650,7 +681,14 @@ public final class ResourceLifecycleTraitValidator extends AbstractValidator {
 
         @Override
         public List<String> visitMultiSelectHash(MultiSelectHashExpression expression) {
-            return ListUtils.of("multiselect hash");
+            // Multi-select hash is allowed: it enables property-to-property reshaping, e.g.
+            // `sseRegions[].{RegionName: @}` to map List<String> to List<{RegionName: String}>.
+            // Recurse into the value expressions to validate they are themselves supported.
+            List<String> unsupported = new ArrayList<>();
+            for (JmespathExpression value : expression.getExpressions().values()) {
+                unsupported.addAll(value.accept(this));
+            }
+            return Collections.unmodifiableList(unsupported);
         }
 
         @Override

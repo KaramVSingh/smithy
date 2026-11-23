@@ -23,12 +23,20 @@ import software.amazon.smithy.model.shapes.ResourceShape;
 import software.amazon.smithy.model.shapes.Shape;
 import software.amazon.smithy.model.shapes.ShapeId;
 import software.amazon.smithy.model.shapes.StructureShape;
+import software.amazon.smithy.model.traits.AbstractResourceLifecycleTrait;
+import software.amazon.smithy.model.traits.CreatesResourcesTrait;
 import software.amazon.smithy.model.traits.NestedPropertiesTrait;
 import software.amazon.smithy.model.traits.NotPropertyTrait;
 import software.amazon.smithy.model.traits.PropertyTrait;
+import software.amazon.smithy.model.traits.PutsResourcesTrait;
+import software.amazon.smithy.model.traits.ReadsResourcesTrait;
+import software.amazon.smithy.model.traits.ResourceBinding;
 import software.amazon.smithy.model.traits.ResourceIdentifierTrait;
+import software.amazon.smithy.model.traits.ResourceLifecycleBinding;
+import software.amazon.smithy.model.traits.UpdatesResourcesTrait;
 import software.amazon.smithy.model.validation.AbstractValidator;
 import software.amazon.smithy.model.validation.ValidationEvent;
+import software.amazon.smithy.utils.ListUtils;
 
 /**
  * Validates that resource properties are correctly used in resource-bound operations.
@@ -115,6 +123,13 @@ public final class ResourceOperationInputOutputValidator extends AbstractValidat
 
         Set<String> definedProperties = new HashSet<>(resource.getProperties().keySet());
         definedProperties.removeAll(propertiesInOperations);
+
+        // Also consider properties that are explicitly bound through resource lifecycle traits
+        // (@createsResources, @readsResources, etc.). These traits map properties via JMESPath
+        // expressions where the input/output member type may not match the property type directly
+        // (e.g. a multi-select hash reshaping List<String> to List<Structure>).
+        definedProperties.removeAll(getLifecycleTraitBoundProperties(model, resource));
+
         for (String propertyNotInLifecycleOp : definedProperties) {
             events.add(error(resource,
                     String.format("Resource property `%s` is not used in the input or output of create, an"
@@ -281,6 +296,42 @@ public final class ResourceOperationInputOutputValidator extends AbstractValidat
                     name,
                     events);
         });
+    }
+
+    /**
+     * Collects property names that are explicitly bound through resource lifecycle traits
+     * ({@code @createsResources}, {@code @putsResources}, {@code @readsResources},
+     * {@code @updatesResources}) on any operation in the model that references this resource.
+     */
+    @SuppressWarnings("unchecked")
+    private Set<String> getLifecycleTraitBoundProperties(Model model, ResourceShape resource) {
+        Set<String> properties = new HashSet<>();
+        List<Class<? extends AbstractResourceLifecycleTrait<?>>> traitClasses = ListUtils.of(
+                CreatesResourcesTrait.class,
+                PutsResourcesTrait.class,
+                ReadsResourcesTrait.class,
+                UpdatesResourcesTrait.class);
+        for (Class<? extends AbstractResourceLifecycleTrait<?>> traitClass : traitClasses) {
+            for (OperationShape operation : model.getOperationShapesWithTrait(traitClass)) {
+                AbstractResourceLifecycleTrait<?> trait = operation.expectTrait(traitClass);
+                for (ResourceBinding binding : trait.getBindings()) {
+                    if (binding.getResource().equals(resource.getId())
+                            && binding instanceof ResourceLifecycleBinding) {
+                        ResourceLifecycleBinding lifecycleBinding = (ResourceLifecycleBinding) binding;
+                        properties.addAll(lifecycleBinding.getProperties().keySet());
+                        // propertiesFrom also implies the property is bound, but we don't need
+                        // to resolve it here — it's enough that it was declared.
+                        lifecycleBinding.getPropertiesFrom().ifPresent(from -> {
+                            // When propertiesFrom is used, all matched properties are bound.
+                            // The ResourceLifecycleTraitValidator validates the actual matches;
+                            // here we just need to know the resource's properties are covered.
+                            properties.addAll(resource.getProperties().keySet());
+                        });
+                    }
+                }
+            }
+        }
+        return properties;
     }
 
     private List<String> getAllOperationProperties(

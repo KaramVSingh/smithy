@@ -14,6 +14,8 @@ import software.amazon.smithy.model.shapes.ShapeId;
  */
 final class JmespathPathResult {
     // The leaf value shape the path resolves to, with array levels unwrapped, or null on error.
+    // For multi-select hash expressions, this is a synthetic StructureShape built from the hash
+    // keys; its ShapeId lives in the `smithy.synthetic` namespace.
     final Shape leaf;
     // True if the path is the bare current node (resolves to the starting shape/root).
     final boolean root;
